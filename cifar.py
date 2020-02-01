@@ -1,5 +1,6 @@
 import numpy as np
 import torchvision
+from PIL import Image
 
 # Define noised CIFAR
 def get_cifar10(root, train_ratio=0.9, asym=True, percent=0., train=True,
