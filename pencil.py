@@ -5,8 +5,9 @@ import numpy as np
 import copy as cp
 
 class PENCIL():
-    def __init__(self, n_samples, n_classes, n_epochs, lrs, alpha, beta, gamma, K=10, save_losses=False, use_KL=True):
+    def __init__(self, all_labels_tensor, n_samples, n_classes, n_epochs, lrs, alpha, beta, gamma, K=10, save_losses=False, use_KL=True):
         '''
+        all_labels_tensor: torch tensor, 1-D tensor of labels indexed as in the training dataset object
         n_samples: int, length of training dataset
         n_epochs: list of positive ints, number of epochs of phases in form [n_epochs_i for i in range(3)]
         lrs: list of floats, learnings rates for phases in form [lr_i for i in range(3)]
@@ -23,7 +24,6 @@ class PENCIL():
         self.n_epochs = n_epochs
         self.lrs = lrs
         self.n_classes = n_classes
-        assert self.n_epochs[0]>0, 'Phase 0 must be non-empty to initialize y_tilde'
         
         self.alpha = alpha
         self.beta = beta
@@ -35,36 +35,43 @@ class PENCIL():
         self.softmax = nn.Softmax(dim=1)
         self.logsoftmax = nn.LogSoftmax(dim=1)
         
-        self.y_tilde = np.zeros([n_samples,n_classes])
+        self._init_y_tilde(all_labels_tensor)
         self.y_prev = None
         self.losses = []
+        
+    def _init_y_tilde(self, all_labels_tensor):
+        '''
+        all_labels_tensor: torch tensor, 1-D tensor of labels indexed as in the training dataset object
+        '''
+        labels_temp = torch.zeros(all_labels_tensor.size(0), self.n_classes).scatter_(1, all_labels_tensor.view(-1, 1).long(), self.K)
+        self.y_tilde = labels_temp.numpy()
         
     def set_lr(self, optimizer, epoch):
         '''
         Call before inner training loop to update lr based on PENCIL phase
         '''
         lr = -1
-        if epoch == 0: lr = self.lrs[0]
-        if epoch == self.n_epochs[0]: lr = self.lrs[1]
-        elif epoch == self.n_epochs[0]+self.n_epochs[1]: lr = self.lrs[2]
-        
+        if epoch == 0: lr = self.lrs[0] # Phase 1
+        elif epoch == self.n_epochs[0]: lr = self.lrs[1] # Phase 2
+        elif epoch == self.n_epochs[0]+self.n_epochs[1]: lr = self.lrs[2] # Phase 3 
+        elif epoch == self.n_epochs[0]+self.n_epochs[1]+self.n_epochs[2]//3: # Phase 3 first decay
+            lr = self.lrs[2]/10
+        elif epoch == self.n_epochs[0]+self.n_epochs[1]+2*self.n_epochs[2]//3: # Phase 3 second decay
+            lr = self.lrs[2]/100
+            
         if lr!=-1:
             for param_group in optimizer.param_groups:
                 param_group['lr'] = lr
-        
+    
     def get_loss(self, epoch, outputs, labels, indices):
         '''
+        outputs: un-normalized logits 
         labels: cuda tensor of noisy labels
         indices: cpu tensor of indices for current batch
         '''
         # Calculate loss based on current phase
         if epoch < self.n_epochs[0]: #Phase 1
             lc = self.CELoss(outputs, labels)
-            # init y_tilde as we train
-            cpu_labels = labels.cpu()
-            labels_temp = torch.zeros(cpu_labels.size(0), self.n_classes).scatter_(1, cpu_labels.view(-1, 1), self.K) #apply temperature 10 before softmax
-            labels_temp = labels_temp.numpy()
-            self.y_tilde[indices, :] = labels_temp
         else:
             self.y_prev = cp.deepcopy(self.y_tilde[indices,:]) #Get unnormalized label estimates
             self.y_prev = torch.tensor(self.y_prev).float()
@@ -72,7 +79,7 @@ class PENCIL():
             self.y_prev.requires_grad = True
             # obtain label distributions (y_hat)
             y_h = self.softmax(self.y_prev)
-            if epoch<self.n_epochs[0]+self.n_epochs[1] or self.use_KL: # During phase 1. If using KL also during phase 2
+            if epoch<self.n_epochs[0]+self.n_epochs[1] or self.use_KL: # During phase 1. 
                 lc = self.KLLoss(self.logsoftmax(self.y_prev),self.softmax(outputs))
             else: # During phase 2 use CE if self.use_KL=False
                 lc = self.CELoss(self.softmax(outputs),self.softmax(y_h))
